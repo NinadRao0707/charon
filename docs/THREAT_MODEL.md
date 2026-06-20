@@ -54,7 +54,7 @@ servers — is treated as potentially hostile.
 |---|---|---|
 | **MCP01 — Token Mismanagement & Secret Exposure** | This is the project's center of gravity. No static, long-lived API keys: every credential is a short-lived (default 5 min) JWT-SVID with a unique `jti`, and a leaked token expires on its own and can be revoked immediately. | 2 ✅ |
 | **Excessive Permissions / Privilege Escalation** | Scopes are explicit on the identity and embedded in the credential; the (Phase 4) gateway enforces scope→capability→tool least privilege. The reaper flags scope that exceeds observed usage (drift). | 2 (scopes) / 4 (enforcement) / 6 (drift) |
-| **Authentication & Identity** | Workloads must pass **attestation** before any credential is issued; credentials are cryptographically verifiable SPIFFE JWT-SVIDs rather than bearer secrets. DPoP (Phase 7) binds tokens to a key to defeat replay. | 2/3 ✅, 7 (DPoP) |
+| **Authentication & Identity** | Workloads must pass **attestation** before any credential is issued; credentials are cryptographically verifiable SPIFFE JWT-SVIDs rather than bearer secrets. DPoP (RFC 9449) binds tokens to a client key, so a stolen token is useless without the key and proofs cannot be replayed. | 2/3 ✅, 7 ✅ (DPoP) |
 | **Insufficient Logging & Monitoring** | Every registration, attestation, transition, issuance, rotation, and revocation is written to a **hash-chained, tamper-evident** audit log that can be independently verified. | 1/2 ✅ |
 | **Shadow / Rogue identities & servers** | Identities are first-class registry objects with a known owner; the Phase 6 reaper detects orphaned identities (owner departed) and idle ones and auto-decommissions them, and flags privilege drift. | 1 (registry) / 6 ✅ (reaper) |
 | **MCP03 — Tool Poisoning** | *Not mitigated by identity alone.* Out of scope for the credential engine; belongs to the Phase 4 gateway's tool-description inspection. Documented here as a known gap. | gap |
@@ -87,15 +87,19 @@ several of these:
 
 ## 6. Residual risks (honest gaps)
 
-- The signing key is a single point of compromise until SPIRE integration
-  (Phase 7) distributes trust; protect it accordingly.
-- Attestation is now real for join-token and Kubernetes SA workloads (Phase 3),
-  with TTL-based re-attestation and optional selector binding. The `DevAttestor`
-  remains available for local use and is always logged as `dev-insecure`. Adding
-  TPM / cloud-instance-identity attestors would broaden coverage.
-- Revocation is checked both at verification time and at the gateway, but an
+- The self-signed signing key is a single point of trust in the local deployment.
+  `charon/spire.py` (Phase 7) provides the production swap: let SPIRE issue and
+  the gateway verify against the SPIRE trust bundle, distributing that trust.
+- Token theft is mitigated by DPoP proof-of-possession (Phase 7) when credentials
+  are key-bound; un-bound credentials remain bearer tokens (short TTL limits the
+  window). Make DPoP binding mandatory in a high-assurance deployment.
+- Attestation is real for join-token and Kubernetes SA workloads (Phase 3), with
+  TTL-based re-attestation and optional selector binding. Adding TPM / cloud
+  instance-identity attestors would broaden coverage.
+- Revocation is checked at verification and at the gateway, but an
   already-validated, still-valid token cannot be retracted mid-flight (mitigated
   by short TTLs).
-- The gateway authorizes tool calls (Phase 4) but does not yet inspect tool
+- The gateway authorizes tool *calls* (Phase 4) but does not inspect tool
   *descriptions* for poisoning (MCP03) or scan arguments/responses for injection
-  (MCP05) or data leakage (MCP10) — those remain documented gaps.
+  (MCP05) or data leakage (MCP10) — those remain documented gaps that pair with,
+  rather than belong inside, an identity engine.

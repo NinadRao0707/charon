@@ -163,7 +163,7 @@ class Registry:
 
     # ---- credentials -------------------------------------------------------
 
-    def issue_credential(self, agent_id: str) -> str:
+    def issue_credential(self, agent_id: str, dpop_jkt: str | None = None) -> str:
         agent = self.get(agent_id)
         # Phase 3 gate: refuse issuance unless attestation is present AND fresh.
         # Short attestation lifetimes force periodic re-proof of identity.
@@ -171,14 +171,18 @@ class Registry:
             from .credentials import NotIssuable
 
             raise NotIssuable("no valid (fresh) attestation on record for agent")
-        token = self._ca.issue(agent)
+        token = self._ca.issue(agent, dpop_jkt=dpop_jkt)
         # First credential activates a freshly provisioned (attested) agent.
         if agent.state == LifecycleState.PROVISIONED:
             self.transition(agent_id, LifecycleState.ACTIVE, reason="first-credential")
         self._record(
             "credential.issued",
             agent.id,
-            {"ttl": self._ca._ttl, "attestation_method": agent.attestation.get("method")},  # noqa: SLF001
+            {
+                "ttl": self._ca._ttl,  # noqa: SLF001
+                "attestation_method": agent.attestation.get("method"),
+                "dpop_bound": bool(dpop_jkt),
+            },
         )
         return token
 

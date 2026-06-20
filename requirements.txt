@@ -17,3 +17,6 @@ mcp>=1.0.0
 # Note: OPA is an external binary (https://www.openpolicyagent.org), not a pip
 # package. The embedded policy engine is the default and needs no extra deps;
 # OpaPolicyEngine only requires a running `opa run --server policies/`.
+
+# Optional: SPIRE integration (charon.spire)
+spiffe>=0.2.0

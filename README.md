@@ -24,9 +24,36 @@ SVIDs.
 | **4 — MCP Gateway + Policy** | Toy MCP servers; per-tool authorization via embedded engine or OPA; scope + argument constraints | ✅ done |
 | **5 — Delegation + Provenance** | RFC 8693 token exchange, `act`-claim chains, downscoping, provenance trace, delegation graph | ✅ done |
 | **6 — Reaper + Dashboard** | idle/orphan/drift detection + auto-decommission; inventory/lifecycle/delegation dashboard | ✅ done |
-| 7 — Hardening | DPoP, SPIRE, adversarial tests | next |
+| **7 — Hardening** | DPoP proof-of-possession; SPIRE integration adapter; hash-chained audit; adversarial test suite | ✅ done |
+| **8 — Polish & writeup** | architecture diagram, demo script, positioning post, LICENSE | ✅ done |
+
+**81 tests passing** across unit and adversarial suites; four runnable demos.
 
 ## Architecture (layered for testability)
+
+```mermaid
+flowchart LR
+    H([human owner]) -->|registers / authorizes| CP
+    subgraph CP[Charon control plane]
+        REG[Registry + lifecycle state machine]
+        ATT[Attestation: join-token / k8s SA]
+        CA[Credential Authority - JWT-SVIDs + DPoP cnf]
+        DEL[Delegation - RFC 8693 act-chains]
+        REAP[Reaper - idle / orphan / drift]
+        AUD[(Hash-chained audit log)]
+        REG --- ATT --- CA --- DEL --- REAP
+        REG -.writes.-> AUD
+    end
+    CA -->|short-lived JWT-SVID| AG([AI agent / workload])
+    AG -->|JWT-SVID + DPoP proof| GW
+    subgraph GWX[ ]
+        GW[MCP Authorization Gateway] -->|per-tool decision| POL[Policy engine - embedded / OPA]
+    end
+    GW -->|allowed calls only| MCP[(MCP servers: filesystem / payments / email)]
+    GW -.authz decisions.-> AUD
+    DASH[Dashboard at /] -.reads.-> CP
+    SPIRE[[SPIRE - production CA swap]] -.verifies SVIDs.-> GW
+```
 
 ```
 charon/
@@ -38,6 +65,8 @@ charon/
   credentials.py   Credential Authority: issue / verify / rotate / revoke JWT-SVIDs
   attestation.py   pluggable attestors: join-token, k8s SA JWT, dev (Phase 3)
   delegation.py    RFC 8693 token exchange + act-claim chains + provenance (Phase 5)
+  dpop.py          DPoP proof-of-possession: RFC 9449 + RFC 7638 thumbprints (Phase 7)
+  spire.py         SPIRE integration adapter (py-spiffe) — production CA swap (Phase 7)
   reaper.py        idle/orphan/drift detection + auto-decommission (Phase 6)
   policy.py        authorization engines: embedded (default) + OPA-backed (Phase 4)
   repository.py    Repository interface + stdlib-sqlite3 implementation (Postgres-ready)
@@ -65,6 +94,7 @@ pip install -r requirements.txt
 python demo.py            # Phases 1-2: lifecycle + credentials
 python demo_gateway.py    # Phases 3-4: attestation + per-tool authorization
 python demo_delegation.py # Phases 5-6: delegation provenance + reaper sweep
+python demo_hardening.py  # Phase 7: DPoP defeats token theft + replay
 
 # Run the tests:
 python -m unittest discover -s tests        # or: pytest
@@ -146,6 +176,32 @@ files under `/data` but is denied `payments.charge` (missing scope), denied
 **Phase 5 milestone (see `demo_delegation.py`):** a `human -> A -> B -> C` chain,
 traced from C's credential all the way back to the human.
 
+## What it does today (Phase 7 — hardening)
+
+13. **Proof-of-possession (DPoP, RFC 9449).** Credentials can be bound to a
+    client key via a `cnf.jkt` claim. The gateway then requires a fresh DPoP
+    proof on every call, signed by the matching private key and bound to the
+    method + URL with a single-use `jti`. A stolen token is useless without the
+    key, and a captured proof cannot be replayed.
+14. **SPIRE integration.** `charon/spire.py` provides workload-side and
+    gateway-side adapters (`py-spiffe`) so SPIRE can replace the self-signed CA
+    in production; the gateway's verifier seam takes a `SpireJwtVerifier` with no
+    other changes.
+15. **Adversarial test suite.** `tests/test_adversarial.py` proves the controls
+    resist token theft, proof replay, scope escalation, confused-deputy forgery,
+    and audit tampering — not just that the happy path works.
+
+**Phase 7 milestone (see `demo_hardening.py`):** the same stolen token is allowed
+for the key-holder and denied (no proof / wrong key / replayed proof) for everyone
+else.
+
+## Documentation
+
+- `docs/DESIGN.md` — landscape analysis and full roadmap
+- `docs/THREAT_MODEL.md` — assets, adversaries, OWASP MCP Top 10 + NIST mapping
+- `docs/BLOG.md` — positioning post: where Charon fits against the standards gaps
+- `docs/DEMO_SCRIPT.md` — 3-minute demo recording script
+
 ## HTTP endpoints
 
 | Method | Path | Purpose |
@@ -169,5 +225,5 @@ traced from C's credential all the way back to the human.
 
 ## License
 
-MIT (suggested). The OWASP MCP Top 10 material referenced in `docs/THREAT_MODEL.md`
-is CC BY-NC-SA 4.0 and is only cited, not reproduced.
+See the `LICENSE` file (MIT). The OWASP MCP Top 10 material referenced in
+`docs/THREAT_MODEL.md` is CC BY-NC-SA 4.0 and is only cited, not reproduced.

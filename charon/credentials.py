@@ -91,12 +91,16 @@ class CredentialAuthority:
 
     # ---- issuance ---------------------------------------------------------
 
-    def issue(self, agent: Agent) -> str:
+    def issue(self, agent: Agent, dpop_jkt: str | None = None) -> str:
         """Mint a short-lived JWT-SVID for an agent.
 
         Issuance is only permitted for PROVISIONED (first credential) or ACTIVE
         identities, and only if the agent has been attested. This is what stops
         Charon from handing credentials to an unverified workload.
+
+        If ``dpop_jkt`` is given, the credential is bound to that key via a
+        ``cnf`` claim (RFC 9449), so it can only be used by a client that proves
+        possession of the matching private key.
         """
         if agent.state not in (LifecycleState.PROVISIONED, LifecycleState.ACTIVE):
             raise NotIssuable(
@@ -119,6 +123,8 @@ class CredentialAuthority:
             "jti": jti,
             "scope": " ".join(sorted(agent.scopes)),
         }
+        if dpop_jkt:
+            claims["cnf"] = {"jkt": dpop_jkt}
         token = jwt.encode(
             claims,
             self._ca.active.private_pem,

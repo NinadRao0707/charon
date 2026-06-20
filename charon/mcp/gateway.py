@@ -20,6 +20,7 @@ official MCP SDK for real deployments.
 from __future__ import annotations
 
 from charon.credentials import CredentialError
+from charon.dpop import DpopError, ReplayCache, verify_proof
 from charon.policy import EmbeddedPolicyEngine, PolicyEngine
 from charon.service import Registry
 
@@ -38,10 +39,17 @@ class MCPGateway:
         registry: Registry,
         servers: list[MCPServer],
         policy: PolicyEngine | None = None,
+        resource_url: str = "https://charon.gateway/mcp",
+        credential_verifier=None,
     ):
         self._registry = registry
         self._servers = {s.name: s for s in servers}
         self._policy = policy or EmbeddedPolicyEngine()
+        self._resource_url = resource_url
+        # Verifier seam: defaults to the registry's own JWT-SVID verification, but
+        # a SPIRE deployment can pass charon.spire.SpireJwtVerifier here instead.
+        self._verify = credential_verifier or registry.verify_credential
+        self._replay = ReplayCache()
 
     # -- public JSON-RPC entrypoint ----------------------------------------
 
@@ -137,7 +145,8 @@ class MCPGateway:
 
     def _authenticate(self, request: dict):
         """Return (ok, claims, error). Credential may be a top-level field or in
-        params._meta.authorization (Bearer <jwt>)."""
+        params._meta.authorization (Bearer <jwt>). If the credential is key-bound
+        (carries a cnf.jkt), a valid DPoP proof is also required."""
         token = request.get("credential")
         if not token:
             meta = (request.get("params", {}) or {}).get("_meta", {}) or {}
@@ -147,9 +156,24 @@ class MCPGateway:
         if not token:
             return False, {}, "no credential presented"
         try:
-            claims = self._registry.verify_credential(token)
+            claims = self._verify(token)
         except CredentialError as exc:
             return False, {}, str(exc)
+
+        # Proof-of-possession: if the token is bound to a key, demand a DPoP proof.
+        jkt = (claims.get("cnf") or {}).get("jkt")
+        if jkt:
+            proof = request.get("dpop") or (
+                (request.get("params", {}) or {}).get("_meta", {}) or {}
+            ).get("dpop")
+            if not proof:
+                return False, {}, "credential is DPoP-bound but no proof presented"
+            try:
+                verify_proof(
+                    proof, "POST", self._resource_url, jkt, self._replay
+                )
+            except DpopError as exc:
+                return False, {}, f"DPoP proof rejected: {exc}"
         return True, claims, ""
 
 
