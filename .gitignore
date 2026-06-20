@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+charon.db
+*.db
+.pytest_cache/
