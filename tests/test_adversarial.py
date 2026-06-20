@@ -147,7 +147,9 @@ class ConfusedDeputyTests(unittest.TestCase):
 
 class AuditTamperTests(unittest.TestCase):
     def test_tampering_persisted_audit_is_detected_on_load(self):
-        path = tempfile.mktemp(suffix=".db")
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "audit.db")
+        repo = repo2 = None
         try:
             repo = SQLiteRepository(path)
             reg = _registry(repo)
@@ -166,8 +168,13 @@ class AuditTamperTests(unittest.TestCase):
             with self.assertRaises(RegistryError):
                 _registry(repo2)
         finally:
+            if repo is not None:
+                repo.close()
+            if repo2 is not None:
+                repo2.close()
             if os.path.exists(path):
                 os.remove(path)
+            os.rmdir(tmpdir)
 
 
 if __name__ == "__main__":

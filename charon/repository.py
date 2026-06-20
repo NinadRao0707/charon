@@ -44,6 +44,27 @@ class SQLiteRepository:
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
 
+    def close(self) -> None:
+        """Close the underlying database connection. Safe to call repeatedly."""
+        conn = getattr(self, "_conn", None)
+        if conn is not None:
+            conn.close()
+            self._conn = None
+
+    def __enter__(self) -> "SQLiteRepository":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Release the connection on GC so we don't emit ResourceWarnings or hold
+        # Windows file locks on temp/test databases.
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def _init_schema(self) -> None:
         self._conn.executescript(
             """
