@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from charon.attestation import AttestationError, DevAttestor
 from charon.ca import CertificateAuthority
 from charon.credentials import CredentialAuthority, CredentialError, NotIssuable
 from charon.delegation import DelegationError
@@ -112,10 +113,16 @@ def get_agent(agent_id: str):
 
 @app.post("/agents/{agent_id}/attest")
 def attest_agent(agent_id: str, req: AttestRequest):
+    # The HTTP path uses the DevAttestor (recorded as 'dev-insecure' in the audit
+    # log). Real join-token / k8s-SA attestation runs server-side via the
+    # attestation module; a production deployment would add a mint endpoint and
+    # dispatch on req.method here.
     try:
-        return _agent_dto(_registry.attest(agent_id, req.method))
+        return _agent_dto(_registry.attest(agent_id, attestor=DevAttestor()))
     except UnknownAgent:
         raise HTTPException(404, "agent not found")
+    except AttestationError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/agents/{agent_id}/transition")
