@@ -1,8 +1,8 @@
-# Core (used by the domain layer — all that's needed to run demo.py and tests)
+# Core — all that's needed to run demo.py, demo_gateway.py, and the tests
 PyJWT>=2.7.0
 cryptography>=42.0.0
 
-# HTTP layer (needed for charon.api.main / uvicorn)
+# HTTP control-plane layer (charon.api.main / uvicorn)
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 pydantic>=2.6.0
@@ -10,3 +10,10 @@ pydantic>=2.6.0
 # Dev
 pytest>=8.0.0
 httpx>=0.27.0
+
+# Optional: real MCP server transport (charon.mcp.stdio_server)
+mcp>=1.0.0
+
+# Note: OPA is an external binary (https://www.openpolicyagent.org), not a pip
+# package. The embedded policy engine is the default and needs no extra deps;
+# OpaPolicyEngine only requires a running `opa run --server policies/`.

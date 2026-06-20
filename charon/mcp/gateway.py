@@ -1,0 +1,150 @@
+"""Phase 4 — the MCP Authorization Gateway.
+
+The gateway sits in front of one or more MCP servers and authorizes *every
+individual tool call*. This closes MCP's structural all-or-nothing gap: in plain
+MCP, once an agent can reach a server it can call any tool the server exposes.
+Here, each ``tools/call`` is checked against the credential's scopes and
+argument-level constraints before it is allowed to reach the server.
+
+Per call the gateway:
+  1. verifies the presented JWT-SVID (signature, expiry, audience, revocation),
+  2. resolves the tool's declared required-scope + constraints,
+  3. asks the PolicyEngine for an allow/deny decision,
+  4. records the decision in the shared hash-chained audit log,
+  5. forwards to the real server only if allowed; otherwise returns an error.
+
+Transport is modelled as JSON-RPC-shaped dicts so the core is testable without a
+live transport. ``charon/mcp/stdio_server.py`` wraps this gateway behind the
+official MCP SDK for real deployments.
+"""
+from __future__ import annotations
+
+from charon.credentials import CredentialError
+from charon.policy import EmbeddedPolicyEngine, PolicyEngine
+from charon.service import Registry
+
+from .servers import MCPServer
+
+# JSON-RPC error codes (custom range for authz failures).
+ERR_UNAUTHENTICATED = -32001  # missing / invalid credential
+ERR_FORBIDDEN = -32002  # valid credential, but policy denied
+ERR_BAD_REQUEST = -32600
+ERR_UNKNOWN_TOOL = -32601
+
+
+class MCPGateway:
+    def __init__(
+        self,
+        registry: Registry,
+        servers: list[MCPServer],
+        policy: PolicyEngine | None = None,
+    ):
+        self._registry = registry
+        self._servers = {s.name: s for s in servers}
+        self._policy = policy or EmbeddedPolicyEngine()
+
+    # -- public JSON-RPC entrypoint ----------------------------------------
+
+    def handle(self, request: dict) -> dict:
+        method = request.get("method")
+        req_id = request.get("id")
+        if method == "tools/list":
+            return self._handle_list(request, req_id)
+        if method == "tools/call":
+            return self._handle_call(request, req_id)
+        return _error(req_id, ERR_BAD_REQUEST, f"unsupported method {method!r}")
+
+    # -- handlers ----------------------------------------------------------
+
+    def _handle_list(self, request: dict, req_id) -> dict:
+        ok, claims, err = self._authenticate(request)
+        if not ok:
+            return _error(req_id, ERR_UNAUTHENTICATED, err)
+        scopes = set(claims.get("scope", "").split())
+        # Only advertise tools the credential could actually invoke. Hiding
+        # unusable tools shrinks the attack surface and limits confused-deputy.
+        visible = []
+        for server in self._servers.values():
+            for t in server.list_tools():
+                if t.required_scope in scopes:
+                    visible.append(
+                        {
+                            "name": f"{server.name}.{t.name}",
+                            "description": t.description,
+                        }
+                    )
+        return _result(req_id, {"tools": visible})
+
+    def _handle_call(self, request: dict, req_id) -> dict:
+        ok, claims, err = self._authenticate(request)
+        if not ok:
+            return _error(req_id, ERR_UNAUTHENTICATED, err)
+
+        params = request.get("params", {}) or {}
+        full_name = params.get("name", "")
+        args = params.get("arguments", {}) or {}
+        subject = claims.get("sub", "unknown")
+
+        if "." not in full_name:
+            return _error(req_id, ERR_BAD_REQUEST, "tool name must be 'server.tool'")
+        server_name, tool_name = full_name.split(".", 1)
+
+        server = self._servers.get(server_name)
+        if server is None:
+            return _error(req_id, ERR_UNKNOWN_TOOL, f"unknown server {server_name!r}")
+        spec = server.tool(tool_name)
+        if spec is None:
+            return _error(req_id, ERR_UNKNOWN_TOOL, f"unknown tool {full_name!r}")
+
+        decision = self._policy.evaluate(
+            {
+                "agent": subject,
+                "scopes": claims.get("scope", "").split(),
+                "server": server_name,
+                "tool": tool_name,
+                "args": args,
+                "required_scope": spec.required_scope,
+                "constraints": spec.constraints,
+            }
+        )
+
+        self._registry.record_authorization(
+            subject, decision.allow, server_name, tool_name, decision.reason
+        )
+
+        if not decision.allow:
+            return _error(req_id, ERR_FORBIDDEN, decision.reason)
+
+        # Authorized: record activity (feeds the Phase 6 reaper), then forward.
+        agent = self._registry.get_by_spiffe(subject)
+        if agent is not None:
+            self._registry.record_activity(agent.id)
+        result = server.call_tool(tool_name, args)
+        return _result(req_id, result)
+
+    # -- helpers -----------------------------------------------------------
+
+    def _authenticate(self, request: dict):
+        """Return (ok, claims, error). Credential may be a top-level field or in
+        params._meta.authorization (Bearer <jwt>)."""
+        token = request.get("credential")
+        if not token:
+            meta = (request.get("params", {}) or {}).get("_meta", {}) or {}
+            auth = meta.get("authorization", "")
+            if auth.lower().startswith("bearer "):
+                token = auth[7:]
+        if not token:
+            return False, {}, "no credential presented"
+        try:
+            claims = self._registry.verify_credential(token)
+        except CredentialError as exc:
+            return False, {}, str(exc)
+        return True, claims, ""
+
+
+def _result(req_id, result: dict) -> dict:
+    return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+
+def _error(req_id, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}

@@ -89,7 +89,13 @@ several of these:
 
 - The signing key is a single point of compromise until SPIRE integration
   (Phase 7) distributes trust; protect it accordingly.
-- Attestation in Phases 1–3 is a recorded flag, not a verified attestation
-  document — strengthen in Phase 3 with a real attestor.
-- Revocation is checked at verification time; an already-validated, still-valid
-  token cannot be retracted mid-flight (mitigated by short TTLs).
+- Attestation is now real for join-token and Kubernetes SA workloads (Phase 3),
+  with TTL-based re-attestation and optional selector binding. The `DevAttestor`
+  remains available for local use and is always logged as `dev-insecure`. Adding
+  TPM / cloud-instance-identity attestors would broaden coverage.
+- Revocation is checked both at verification time and at the gateway, but an
+  already-validated, still-valid token cannot be retracted mid-flight (mitigated
+  by short TTLs).
+- The gateway authorizes tool calls (Phase 4) but does not yet inspect tool
+  *descriptions* for poisoning (MCP03) or scan arguments/responses for injection
+  (MCP05) or data leakage (MCP10) — those remain documented gaps.

@@ -35,12 +35,22 @@ class Agent:
     spiffe_id: str | None = None  # assigned at registration time
     state: LifecycleState = LifecycleState.PROVISIONED
     attested: bool = False
+    # Verified attestation metadata (method, selectors, attested_at, expires_at).
+    # Empty until the agent has successfully attested (Phase 3).
+    attestation: dict = field(default_factory=dict)
     created_at: float = field(default_factory=_now)
     last_seen: float | None = None
 
     def touch(self) -> None:
         """Record activity; used by the reaper to detect idle identities."""
         self.last_seen = _now()
+
+    def attestation_valid(self, now: float | None = None) -> bool:
+        """True if the agent has a fresh (non-expired) attestation on record."""
+        if not self.attested or not self.attestation:
+            return False
+        now = now if now is not None else _now()
+        return float(self.attestation.get("expires_at", 0.0)) > now
 
 
 @dataclass

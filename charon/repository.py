@@ -53,6 +53,7 @@ class SQLiteRepository:
                 spiffe_id   TEXT,
                 state       TEXT NOT NULL,
                 attested    INTEGER NOT NULL,
+                attestation TEXT NOT NULL DEFAULT '{}',
                 created_at  REAL NOT NULL,
                 last_seen   REAL
             );
@@ -84,8 +85,8 @@ class SQLiteRepository:
         self._conn.execute(
             """INSERT INTO agents
                (id, name, owner, purpose, scopes, parent_id, spiffe_id,
-                state, attested, created_at, last_seen)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                state, attested, attestation, created_at, last_seen)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 agent.id,
                 agent.name,
@@ -96,6 +97,7 @@ class SQLiteRepository:
                 agent.spiffe_id,
                 agent.state.value,
                 int(agent.attested),
+                json.dumps(agent.attestation),
                 agent.created_at,
                 agent.last_seen,
             ),
@@ -111,7 +113,7 @@ class SQLiteRepository:
     def update_agent(self, agent: Agent) -> None:
         self._conn.execute(
             """UPDATE agents SET name=?, owner=?, purpose=?, scopes=?, parent_id=?,
-               spiffe_id=?, state=?, attested=?, last_seen=? WHERE id=?""",
+               spiffe_id=?, state=?, attested=?, attestation=?, last_seen=? WHERE id=?""",
             (
                 agent.name,
                 agent.owner,
@@ -121,6 +123,7 @@ class SQLiteRepository:
                 agent.spiffe_id,
                 agent.state.value,
                 int(agent.attested),
+                json.dumps(agent.attestation),
                 agent.last_seen,
                 agent.id,
             ),
@@ -143,6 +146,7 @@ class SQLiteRepository:
             spiffe_id=row["spiffe_id"],
             state=LifecycleState(row["state"]),
             attested=bool(row["attested"]),
+            attestation=json.loads(row["attestation"] if "attestation" in row.keys() else "{}"),
             created_at=row["created_at"],
             last_seen=row["last_seen"],
         )
