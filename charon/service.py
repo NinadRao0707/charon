@@ -49,6 +49,9 @@ class Registry:
             self._audit._entries.append(entry)  # noqa: SLF001 (intentional rehydrate)
         if not self._audit.verify():
             raise RegistryError("audit log failed integrity check on load")
+        # Rehydrate the revocation list so revoked credentials remain rejected
+        # across restarts (the entries are persisted; the in-memory set is not).
+        self._ca.import_revocations(repo.list_revocations())
 
     # ---- registration -----------------------------------------------------
 

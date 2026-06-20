@@ -16,6 +16,7 @@ import base64
 import hashlib
 
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
@@ -38,6 +39,14 @@ class SigningKey:
     @classmethod
     def generate(cls) -> "SigningKey":
         return cls(Ed25519PrivateKey.generate())
+
+    @classmethod
+    def from_private_pem(cls, pem: bytes) -> "SigningKey":
+        """Load a persisted Ed25519 signing key from PEM bytes."""
+        key = load_pem_private_key(pem, password=None)
+        if not isinstance(key, Ed25519PrivateKey):
+            raise ValueError("signing key must be Ed25519")
+        return cls(key)
 
     @property
     def private_pem(self) -> bytes:

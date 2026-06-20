@@ -4,3 +4,5 @@ __pycache__/
 charon.db
 *.db
 .pytest_cache/
+charon_signing_key.pem
+*.pem

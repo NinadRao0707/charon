@@ -29,17 +29,43 @@ from charon.repository import SQLiteRepository
 from charon.service import Registry, UnknownAgent
 
 from .dashboard import DASHBOARD_HTML
+from charon.ca import SigningKey
+from charon.mcp import EmailServer, FilesystemServer, MCPGateway, PaymentsServer
+
+from contextlib import asynccontextmanager
 
 TRUST_DOMAIN = os.environ.get("CHARON_TRUST_DOMAIN", "charon.local")
 DB_PATH = os.environ.get("CHARON_DB", "charon.db")
+KEY_PATH = os.environ.get("CHARON_SIGNING_KEY", "charon_signing_key.pem")
+
+
+def _load_or_create_ca() -> CertificateAuthority:
+    """Persist the signing key so credentials issued before a restart remain
+    verifiable afterwards. Generated on first run, reused thereafter."""
+    if os.path.exists(KEY_PATH):
+        with open(KEY_PATH, "rb") as f:
+            return CertificateAuthority(active=SigningKey.from_private_pem(f.read()))
+    ca = CertificateAuthority()
+    with open(KEY_PATH, "wb") as f:
+        f.write(ca.active.private_pem)
+    return ca
+
 
 # --- composition root --------------------------------------------------------
 _repo = SQLiteRepository(DB_PATH)
-_ca = CertificateAuthority()
+_ca = _load_or_create_ca()
 _authority = CredentialAuthority(_ca, TRUST_DOMAIN)
 _registry = Registry(_repo, _authority, TRUST_DOMAIN)
+_gateway = MCPGateway(_registry, [FilesystemServer(), PaymentsServer(), EmailServer()])
 
-app = FastAPI(title="Charon — NHI Lifecycle Engine", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: "FastAPI"):
+    yield
+    _repo.close()  # release the SQLite connection on shutdown
+
+
+app = FastAPI(title="Charon — NHI Lifecycle Engine", version="0.1.0", lifespan=lifespan)
 
 
 # --- schemas -----------------------------------------------------------------
@@ -71,6 +97,23 @@ class VerifyRequest(BaseModel):
 
 class RotateRequest(BaseModel):
     previous_token: str | None = None
+
+
+class IssueRequest(BaseModel):
+    # Optional DPoP key thumbprint (RFC 9449 cnf.jkt) to bind the credential to.
+    dpop_jkt: str | None = None
+
+
+class McpCallRequest(BaseModel):
+    credential: str
+    name: str  # "server.tool", e.g. "payments.charge"
+    arguments: dict = Field(default_factory=dict)
+    dpop: str | None = None  # DPoP proof, required if the credential is key-bound
+
+
+class McpListRequest(BaseModel):
+    credential: str
+    dpop: str | None = None
 
 
 def _agent_dto(agent) -> dict:
@@ -137,9 +180,11 @@ def transition_agent(agent_id: str, req: TransitionRequest):
 
 # --- credentials -------------------------------------------------------------
 @app.post("/agents/{agent_id}/credentials")
-def issue_credential(agent_id: str):
+def issue_credential(agent_id: str, req: "IssueRequest | None" = None):
     try:
-        token = _registry.issue_credential(agent_id)
+        token = _registry.issue_credential(
+            agent_id, dpop_jkt=(req.dpop_jkt if req else None)
+        )
         return {"token": token, "token_type": "JWT-SVID"}
     except UnknownAgent:
         raise HTTPException(404, "agent not found")
@@ -267,6 +312,9 @@ class ReaperConfig(BaseModel):
     decommission_after_idle: float = 7 * 86_400
     departed_owners: list[str] = Field(default_factory=list)
     apply: bool = False
+    # Optional clock override (epoch seconds) so demos can fast-forward to
+    # trigger idle/decommission without waiting real time.
+    now: float | None = None
 
 
 @app.post("/reaper/run")
@@ -277,7 +325,7 @@ def reaper_run(cfg: ReaperConfig):
         decommission_after_idle=cfg.decommission_after_idle,
         departed_owners=set(cfg.departed_owners),
     )
-    actions = reaper.run_once(apply=cfg.apply)
+    actions = reaper.run_once(now=cfg.now, apply=cfg.apply)
     return {
         "applied": cfg.apply,
         "actions": [
@@ -286,6 +334,31 @@ def reaper_run(cfg: ReaperConfig):
             for a in actions
         ],
     }
+
+
+# --- MCP gateway (Phase 4 over HTTP) -----------------------------------------
+@app.post("/mcp/tools")
+def mcp_tools(req: McpListRequest):
+    """List the tools the presented credential is allowed to call."""
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+               "credential": req.credential}
+    if req.dpop:
+        request["dpop"] = req.dpop
+    return _gateway.handle(request)
+
+
+@app.post("/mcp/call")
+def mcp_call(req: McpCallRequest):
+    """Authorize and (if permitted) forward a single tool call through the
+    gateway. Returns the JSON-RPC result on success or an error object on a
+    denied/blocked call — the same per-tool authorization shown in demo_gateway.py,
+    now reachable over HTTP."""
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": req.name, "arguments": req.arguments},
+               "credential": req.credential}
+    if req.dpop:
+        request["dpop"] = req.dpop
+    return _gateway.handle(request)
 
 
 # --- dashboard (Phase 6) -----------------------------------------------------

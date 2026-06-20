@@ -209,6 +209,16 @@ class CredentialAuthority:
     def is_revoked(self, jti: str) -> bool:
         return jti in self._revoked
 
+    def import_revocations(self, revocations) -> int:
+        """Rehydrate the in-memory revocation set from persisted entries (called
+        on startup so revoked credentials stay rejected across restarts)."""
+        count = 0
+        for rev in revocations:
+            if rev.jti:
+                self._revoked[rev.jti] = rev
+                count += 1
+        return count
+
     def prune_revocation_list(self, now: float | None = None) -> int:
         """Drop revocation entries whose tokens have already expired (they can no
         longer be accepted anyway). Returns the number pruned."""

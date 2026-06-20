@@ -27,7 +27,7 @@ SVIDs.
 | **7 — Hardening** | DPoP proof-of-possession; SPIRE integration adapter; hash-chained audit; adversarial test suite | ✅ done |
 | **8 — Polish & writeup** | architecture diagram, demo script, positioning post, LICENSE | ✅ done |
 
-**81 tests passing** across unit and adversarial suites; four runnable demos.
+**84 tests passing** across unit and adversarial suites; four runnable demos.
 
 ## Architecture (layered for testability)
 
@@ -103,6 +103,8 @@ python -m unittest discover -s tests        # or: pytest
 uvicorn charon.api.main:app --reload
 # then open http://127.0.0.1:8000/        (dashboard)
 #       and http://127.0.0.1:8000/docs    (API)
+# State persists in charon.db; the signing key persists in charon_signing_key.pem
+# (override paths with CHARON_DB / CHARON_SIGNING_KEY), so tokens survive restarts.
 
 # (Optional) run the gateway as a real MCP server:
 pip install mcp
@@ -218,7 +220,9 @@ else.
 | POST | `/delegation/exchange` | RFC 8693 token exchange (hop N>1) |
 | POST | `/delegation/trace` | reconstruct a credential's provenance path |
 | GET | `/delegations` | delegation edges (for the graph) |
-| POST | `/reaper/run` | run the reaper (apply or dry-run) |
+| POST | `/reaper/run` | run the reaper (apply or dry-run; optional `now` override) |
+| POST | `/mcp/tools` | list tools the credential may call (via the gateway) |
+| POST | `/mcp/call` | authorize + forward a single tool call (per-tool authz over HTTP) |
 | GET | `/` | dashboard |
 | GET | `/.well-known/charon/trust-bundle` | public keys for verifiers |
 | GET | `/audit` | audit trail + integrity status |
