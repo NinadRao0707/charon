@@ -22,9 +22,9 @@ SVIDs.
 | **2 — Credential Authority** | Short-lived JWT-SVIDs, SPIFFE naming, scope claims, rotation, revocation, key rotation | ✅ done |
 | **3 — Attestation** | Pluggable attestors (join-token, k8s SA JWT, dev); issuance gated on fresh attestation; selector binding | ✅ done |
 | **4 — MCP Gateway + Policy** | Toy MCP servers; per-tool authorization via embedded engine or OPA; scope + argument constraints | ✅ done |
-| 5 — Delegation + Provenance | RFC 8693 token exchange, `act` chains | next |
-| 6 — Reaper + Dashboard | idle/orphan/drift auto-decommission | planned |
-| 7 — Hardening | DPoP, SPIRE, adversarial tests | planned |
+| **5 — Delegation + Provenance** | RFC 8693 token exchange, `act`-claim chains, downscoping, provenance trace, delegation graph | ✅ done |
+| **6 — Reaper + Dashboard** | idle/orphan/drift detection + auto-decommission; inventory/lifecycle/delegation dashboard | ✅ done |
+| 7 — Hardening | DPoP, SPIRE, adversarial tests | next |
 
 ## Architecture (layered for testability)
 
@@ -37,13 +37,16 @@ charon/
   ca.py            Ed25519 signing authority + trust bundle (key rotation)
   credentials.py   Credential Authority: issue / verify / rotate / revoke JWT-SVIDs
   attestation.py   pluggable attestors: join-token, k8s SA JWT, dev (Phase 3)
+  delegation.py    RFC 8693 token exchange + act-claim chains + provenance (Phase 5)
+  reaper.py        idle/orphan/drift detection + auto-decommission (Phase 6)
   policy.py        authorization engines: embedded (default) + OPA-backed (Phase 4)
   repository.py    Repository interface + stdlib-sqlite3 implementation (Postgres-ready)
-  service.py       Registry: orchestrates lifecycle + attestation + audit + credentials
+  service.py       Registry: orchestrates lifecycle + attestation + delegation + audit
   mcp/servers.py   toy MCP servers: filesystem, payments, email (Phase 4)
   mcp/gateway.py   MCP authorization gateway: per-tool authz enforcement point (Phase 4)
   mcp/stdio_server.py  real MCP-SDK entrypoint wrapping the gateway
   api/main.py      FastAPI HTTP layer (thin adapter over service.py)
+  api/dashboard.py single-page dashboard: inventory + lifecycle + delegation graph (Phase 6)
   policies/authz.rego  Rego policy mirroring the embedded engine (for OPA)
 ```
 
@@ -61,13 +64,15 @@ pip install -r requirements.txt
 # Run the end-to-end walkthrough (no DB or network needed):
 python demo.py            # Phases 1-2: lifecycle + credentials
 python demo_gateway.py    # Phases 3-4: attestation + per-tool authorization
+python demo_delegation.py # Phases 5-6: delegation provenance + reaper sweep
 
 # Run the tests:
 python -m unittest discover -s tests        # or: pytest
 
 # Run the HTTP control-plane API:
 uvicorn charon.api.main:app --reload
-# then open http://127.0.0.1:8000/docs
+# then open http://127.0.0.1:8000/        (dashboard)
+#       and http://127.0.0.1:8000/docs    (API)
 
 # (Optional) run the gateway as a real MCP server:
 pip install mcp
@@ -121,6 +126,26 @@ opa run --server policies/        # then construct MCPGateway(..., policy=OpaPol
 files under `/data` but is denied `payments.charge` (missing scope), denied
 `/etc/shadow` (path escape), and the gateway hides tools it can't use.
 
+## What it does today (Phases 5–6)
+
+10. **Delegation with provenance.** RFC 8693 token exchange lets one agent act on
+    behalf of another while preserving the originating human as `sub` and nesting
+    each actor in the `act` claim. Authority only ever **narrows** down a chain
+    (requested scope must be a subset of the delegating token's scope). `trace()`
+    reconstructs the full path back to the human, and the gateway records that
+    provenance on every delegated call.
+11. **The Reaper.** A sweep that moves inactive `ACTIVE` agents to `IDLE`,
+    decommissions long-idle ones, revokes-and-decommissions **orphaned** agents
+    whose owner has departed, and **flags privilege drift** (granted scopes never
+    exercised, derived from the audit log). It runs in apply or dry-run mode, and
+    every action flows through the audited lifecycle transitions.
+12. **Dashboard** at `GET /` — lifecycle state counts, the identity inventory,
+    a delegation graph (principal → agents), a reaper dry-run preview, and the
+    live audit feed with chain-integrity status.
+
+**Phase 5 milestone (see `demo_delegation.py`):** a `human -> A -> B -> C` chain,
+traced from C's credential all the way back to the human.
+
 ## HTTP endpoints
 
 | Method | Path | Purpose |
@@ -133,6 +158,12 @@ files under `/data` but is denied `payments.charge` (missing scope), denied
 | POST | `/agents/{id}/credentials/rotate` | rotate |
 | POST | `/agents/{id}/credentials/revoke` | revoke |
 | POST | `/credentials/verify` | verify a token |
+| POST | `/delegation/begin` | start a chain (agent on behalf of a human) |
+| POST | `/delegation/exchange` | RFC 8693 token exchange (hop N>1) |
+| POST | `/delegation/trace` | reconstruct a credential's provenance path |
+| GET | `/delegations` | delegation edges (for the graph) |
+| POST | `/reaper/run` | run the reaper (apply or dry-run) |
+| GET | `/` | dashboard |
 | GET | `/.well-known/charon/trust-bundle` | public keys for verifiers |
 | GET | `/audit` | audit trail + integrity status |
 

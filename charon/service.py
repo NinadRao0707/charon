@@ -12,12 +12,13 @@ from . import spiffe
 from .attestation import AttestationError, Attestor, DevAttestor
 from .audit import AuditLog
 from .credentials import CredentialAuthority
+from .delegation import DelegationAuthority, Provenance
 from .lifecycle import (
     LifecycleState,
     TransitionContext,
     check_transition,
 )
-from .models import Agent, RevokedCredential
+from .models import Agent, Delegation, RevokedCredential
 from .repository import Repository
 
 
@@ -38,6 +39,7 @@ class Registry:
     ):
         self._repo = repo
         self._ca = credential_authority
+        self._delegation = DelegationAuthority(credential_authority)
         self._trust_domain = trust_domain
         # Rehydrate the audit chain from storage so head_hash stays correct
         # across restarts.
@@ -207,6 +209,67 @@ class Registry:
     def verify_credential(self, token: str) -> dict:
         return self._ca.verify(token)
 
+    # ---- delegation & provenance (Phase 5) --------------------------------
+
+    def begin_on_behalf_of(
+        self, human_principal: str, actor_token: str, scope: list[str]
+    ) -> str:
+        """Start a delegation chain: an agent acting on behalf of a human."""
+        token = self._delegation.begin_on_behalf_of(human_principal, actor_token, scope)
+        actor = self._ca.verify(actor_token)["sub"]
+        self._repo.add_delegation(
+            Delegation(
+                principal=human_principal,
+                delegator=human_principal,
+                delegate=actor,
+                scope=" ".join(sorted(scope)),
+            )
+        )
+        self._record(
+            "delegation.begin",
+            actor,
+            {"principal": human_principal, "scope": sorted(scope)},
+        )
+        return token
+
+    def delegate(
+        self, subject_token: str, actor_token: str, scope: list[str] | None = None
+    ) -> str:
+        """Continue a chain via RFC 8693 token exchange (hop N>1)."""
+        token = self._delegation.exchange(subject_token, actor_token, scope)
+        subject_claims = self._ca.verify(subject_token)
+        actor = self._ca.verify(actor_token)["sub"]
+        delegator = (subject_claims.get("act") or {}).get("sub", subject_claims["sub"])
+        new_claims = self._ca.verify(token)
+        self._repo.add_delegation(
+            Delegation(
+                principal=subject_claims["sub"],
+                delegator=delegator,
+                delegate=actor,
+                scope=new_claims.get("scope", ""),
+            )
+        )
+        self._record(
+            "delegation.exchange",
+            actor,
+            {
+                "principal": subject_claims["sub"],
+                "delegator": delegator,
+                "provenance": str(self._delegation.trace(new_claims)),
+            },
+        )
+        return token
+
+    def trace(self, token: str) -> Provenance:
+        """Reconstruct the authority path of a (delegated) credential."""
+        claims = self._ca.verify(token)
+        return self._delegation.trace(claims)
+
+    def list_delegations(self) -> list[Delegation]:
+        return self._repo.list_delegations()
+
+    # ---- authorization recording & usage ----------------------------------
+
     def record_authorization(
         self,
         subject: str,
@@ -214,12 +277,46 @@ class Registry:
         server: str,
         tool: str,
         reason: str | None = None,
+        required_scope: str | None = None,
+        provenance: str | None = None,
     ) -> None:
-        """Record a gateway authorization decision in the shared audit chain."""
+        """Record a gateway authorization decision in the shared audit chain.
+
+        ``subject`` should be the *acting* agent (the immediate actor), so usage
+        and drift can be attributed correctly even for delegated calls.
+        """
         self._record(
             "authz.allowed" if allowed else "authz.denied",
             subject,
-            {"server": server, "tool": tool, "reason": reason},
+            {
+                "server": server,
+                "tool": tool,
+                "reason": reason,
+                "required_scope": required_scope,
+                "provenance": provenance,
+            },
+        )
+
+    def used_scopes(self, actor: str) -> set[str]:
+        """Scopes an actor has actually exercised, derived from allowed calls in
+        the audit log. Used by the reaper to detect privilege drift."""
+        used: set[str] = set()
+        for e in self._audit.entries():
+            if (
+                e.event == "authz.allowed"
+                and e.subject == actor
+                and e.details.get("required_scope")
+            ):
+                used.add(e.details["required_scope"])
+        return used
+
+    def record_drift(self, agent_id: str, granted: list[str], used: list[str]) -> None:
+        """Record a privilege-drift finding (granted scopes never exercised)."""
+        self._record(
+            "drift.detected",
+            agent_id,
+            {"granted": sorted(granted), "used": sorted(used),
+             "unused": sorted(set(granted) - set(used))},
         )
 
     # ---- audit -------------------------------------------------------------

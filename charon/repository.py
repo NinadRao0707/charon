@@ -13,7 +13,7 @@ from typing import Protocol
 
 from .audit import AuditEntry
 from .lifecycle import LifecycleState
-from .models import Agent, RevokedCredential
+from .models import Agent, Delegation, RevokedCredential
 
 
 class Repository(Protocol):
@@ -30,6 +30,10 @@ class Repository(Protocol):
     # revocation
     def add_revocation(self, rev: RevokedCredential) -> None: ...
     def list_revocations(self) -> list[RevokedCredential]: ...
+
+    # delegation
+    def add_delegation(self, d: Delegation) -> None: ...
+    def list_delegations(self) -> list[Delegation]: ...
 
 
 class SQLiteRepository:
@@ -74,6 +78,15 @@ class SQLiteRepository:
                 revoked_at REAL NOT NULL,
                 expires_at REAL NOT NULL,
                 reason     TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS delegations (
+                id          TEXT PRIMARY KEY,
+                principal   TEXT NOT NULL,
+                delegator   TEXT NOT NULL,
+                delegate    TEXT NOT NULL,
+                scope       TEXT NOT NULL,
+                created_at  REAL NOT NULL
             );
             """
         )
@@ -205,6 +218,33 @@ class SQLiteRepository:
                 revoked_at=r["revoked_at"],
                 expires_at=r["expires_at"],
                 reason=r["reason"],
+            )
+            for r in rows
+        ]
+
+    # ---- delegation -------------------------------------------------------
+
+    def add_delegation(self, d: Delegation) -> None:
+        self._conn.execute(
+            """INSERT INTO delegations
+               (id, principal, delegator, delegate, scope, created_at)
+               VALUES (?,?,?,?,?,?)""",
+            (d.id, d.principal, d.delegator, d.delegate, d.scope, d.created_at),
+        )
+        self._conn.commit()
+
+    def list_delegations(self) -> list[Delegation]:
+        rows = self._conn.execute(
+            "SELECT * FROM delegations ORDER BY created_at"
+        ).fetchall()
+        return [
+            Delegation(
+                id=r["id"],
+                principal=r["principal"],
+                delegator=r["delegator"],
+                delegate=r["delegate"],
+                scope=r["scope"],
+                created_at=r["created_at"],
             )
             for r in rows
         ]

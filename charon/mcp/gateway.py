@@ -108,15 +108,26 @@ class MCPGateway:
             }
         )
 
+        # The acting agent is the immediate actor (outermost act.sub) for a
+        # delegated credential, otherwise the subject itself.
+        actor = (claims.get("act") or {}).get("sub") or subject
+        provenance = _provenance_str(claims)
+
         self._registry.record_authorization(
-            subject, decision.allow, server_name, tool_name, decision.reason
+            actor,
+            decision.allow,
+            server_name,
+            tool_name,
+            reason=decision.reason,
+            required_scope=spec.required_scope,
+            provenance=provenance,
         )
 
         if not decision.allow:
             return _error(req_id, ERR_FORBIDDEN, decision.reason)
 
-        # Authorized: record activity (feeds the Phase 6 reaper), then forward.
-        agent = self._registry.get_by_spiffe(subject)
+        # Authorized: record activity for the *acting* agent (feeds the reaper).
+        agent = self._registry.get_by_spiffe(actor)
         if agent is not None:
             self._registry.record_activity(agent.id)
         result = server.call_tool(tool_name, args)
@@ -148,3 +159,17 @@ def _result(req_id, result: dict) -> dict:
 
 def _error(req_id, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
+
+def _provenance_str(claims: dict) -> str | None:
+    """Render 'principal -> a -> b -> actor' for a delegated credential."""
+    if "act" not in claims:
+        return None
+    actors_recent_first = []
+    act = claims.get("act")
+    while isinstance(act, dict):
+        if "sub" in act:
+            actors_recent_first.append(act["sub"])
+        act = act.get("act")
+    path = [claims.get("sub", "unknown"), *reversed(actors_recent_first)]
+    return " -> ".join(path)

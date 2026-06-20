@@ -62,3 +62,16 @@ class RevokedCredential:
     revoked_at: float = field(default_factory=_now)
     expires_at: float = 0.0  # original token exp; lets us prune the list safely
     reason: str | None = None
+
+
+@dataclass
+class Delegation:
+    """A recorded delegation edge: ``delegator`` granted authority to ``delegate``
+    while acting on behalf of ``principal`` (the originating human)."""
+
+    principal: str
+    delegator: str  # SPIFFE id of the granting party (or the principal for hop 1)
+    delegate: str  # SPIFFE id of the receiving agent
+    scope: str = ""
+    id: str = field(default_factory=_new_id)
+    created_at: float = field(default_factory=_now)

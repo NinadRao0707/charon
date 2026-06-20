@@ -60,6 +60,35 @@ class CredentialAuthority:
         # jti -> RevokedCredential
         self._revoked: dict[str, RevokedCredential] = {}
 
+    # ---- accessors (reused by the delegation authority) -------------------
+
+    @property
+    def audience(self) -> str:
+        return self._audience
+
+    @property
+    def trust_domain(self) -> str:
+        return self._trust_domain
+
+    @property
+    def ttl(self) -> int:
+        return self._ttl
+
+    def sign_claims(self, claims: dict) -> str:
+        """Sign an arbitrary claim set with the active key (used for RFC 8693
+        token exchange). Temporal/jti claims are filled in if absent."""
+        now = int(time.time())
+        claims.setdefault("iat", now)
+        claims.setdefault("nbf", now)
+        claims.setdefault("exp", now + self._ttl)
+        claims.setdefault("aud", self._audience)
+        return jwt.encode(
+            claims,
+            self._ca.active.private_pem,
+            algorithm=_ALG,
+            headers={"kid": self._ca.active.kid},
+        )
+
     # ---- issuance ---------------------------------------------------------
 
     def issue(self, agent: Agent) -> str:

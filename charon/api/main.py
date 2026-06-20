@@ -12,17 +12,22 @@ from __future__ import annotations
 import os
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from charon.ca import CertificateAuthority
 from charon.credentials import CredentialAuthority, CredentialError, NotIssuable
+from charon.delegation import DelegationError
 from charon.lifecycle import (
     IllegalTransition,
     LifecycleState,
     TransitionGuardFailed,
 )
+from charon.reaper import Reaper
 from charon.repository import SQLiteRepository
 from charon.service import Registry, UnknownAgent
+
+from .dashboard import DASHBOARD_HTML
 
 TRUST_DOMAIN = os.environ.get("CHARON_TRUST_DOMAIN", "charon.local")
 DB_PATH = os.environ.get("CHARON_DB", "charon.db")
@@ -191,3 +196,93 @@ def audit():
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "trust_domain": TRUST_DOMAIN}
+
+
+# --- delegation (Phase 5) ----------------------------------------------------
+class BeginOboRequest(BaseModel):
+    human_principal: str
+    actor_token: str
+    scope: list[str]
+
+
+class ExchangeRequest(BaseModel):
+    subject_token: str
+    actor_token: str
+    scope: list[str] | None = None
+
+
+@app.post("/delegation/begin")
+def delegation_begin(req: BeginOboRequest):
+    try:
+        token = _registry.begin_on_behalf_of(
+            req.human_principal, req.actor_token, req.scope
+        )
+        return {"token": token, "token_type": "JWT-SVID"}
+    except (DelegationError, CredentialError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/delegation/exchange")
+def delegation_exchange(req: ExchangeRequest):
+    try:
+        token = _registry.delegate(req.subject_token, req.actor_token, req.scope)
+        return {"token": token, "token_type": "JWT-SVID"}
+    except (DelegationError, CredentialError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/delegation/trace")
+def delegation_trace(req: VerifyRequest):
+    try:
+        prov = _registry.trace(req.token)
+        return {"principal": prov.principal, "actors": prov.actors, "path": prov.path}
+    except CredentialError as e:
+        raise HTTPException(401, str(e))
+
+
+@app.get("/delegations")
+def list_delegations():
+    return [
+        {
+            "principal": d.principal,
+            "delegator": d.delegator,
+            "delegate": d.delegate,
+            "scope": d.scope,
+            "created_at": d.created_at,
+        }
+        for d in _registry.list_delegations()
+    ]
+
+
+# --- reaper (Phase 6) --------------------------------------------------------
+class ReaperConfig(BaseModel):
+    idle_after: float = 86_400
+    decommission_after_idle: float = 7 * 86_400
+    departed_owners: list[str] = Field(default_factory=list)
+    apply: bool = False
+
+
+@app.post("/reaper/run")
+def reaper_run(cfg: ReaperConfig):
+    reaper = Reaper(
+        _registry,
+        idle_after=cfg.idle_after,
+        decommission_after_idle=cfg.decommission_after_idle,
+        departed_owners=set(cfg.departed_owners),
+    )
+    actions = reaper.run_once(apply=cfg.apply)
+    return {
+        "applied": cfg.apply,
+        "actions": [
+            {"agent_id": a.agent_id, "name": a.name, "action": a.action,
+             "detail": a.detail}
+            for a in actions
+        ],
+    }
+
+
+# --- dashboard (Phase 6) -----------------------------------------------------
+@app.get("/", response_class=HTMLResponse)
+def dashboard():
+    return DASHBOARD_HTML
+
